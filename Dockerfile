@@ -27,9 +27,14 @@ COPY requirements.txt .
 # ── Install Python dependencies ────────────────────────
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── Copy source code ───────────────────────────────────
+# ── Copy source code only ──────────────────────────────
 COPY src/ ./src/
-COPY data/ ./data/
+
+# ── Create empty data directories ─────────────────────
+# Documents are generated at startup, not baked into image
+# Why? Baking docs into image means rebuilding every time
+# docs change. Runtime generation is more flexible.
+RUN mkdir -p data/raw data/processed
 
 # ── Environment variables ──────────────────────────────
 # Don't hardcode secrets — pass them at runtime
@@ -37,7 +42,6 @@ ENV AZURE_OPENAI_KEY=""
 
 # ── Expose port ────────────────────────────────────────
 # FastAPI runs on 8000 by default
-# AWS will map this to port 80/443
 EXPOSE 8000
 
 # ── Start command ──────────────────────────────────────
