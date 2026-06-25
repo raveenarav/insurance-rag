@@ -19,6 +19,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import os
 import re
+import json
+import random
 import numpy as np
 import faiss
 from pathlib import Path
@@ -73,24 +75,127 @@ INJECTION_PATTERNS = [
 ]
 
 
-# ── Lifespan — runs on startup and shutdown ───────────
+# ── Document generation ───────────────────────────────
+def generate_synthetic_docs(raw_dir):
+    """Generate synthetic insurance docs if folder is empty."""
+    random.seed(42)
+
+    AUTO = """POLICY DOCUMENT - AUTO INSURANCE
+Policy Number: {policy_no}
+Policyholder: {holder}
+Effective Date: 2024-01-15
+
+SECTION 1 - COVERAGE
+Comprehensive auto insurance including liability, collision, theft, fire.
+
+SECTION 2 - PREMIUMS AND DEDUCTIBLES
+Annual Premium: ${premium}
+Collision Deductible: ${collision_ded}
+A deductible is the amount you pay before insurance covers the rest.
+
+SECTION 3 - CLAIMS PROCEDURE
+To file a claim:
+1. Report within 72 hours by calling 1-800-CLAIMS.
+2. Provide policy number and incident description.
+3. Submit police report for theft or injury.
+Claims processed within 14 business days.
+
+SECTION 4 - EXCLUSIONS
+Does NOT cover: DUI, commercial use, wear and tear."""
+
+    HOME = """POLICY DOCUMENT - HOME INSURANCE
+Policy Number: {policy_no}
+Policyholder: {holder}
+Effective Date: 2024-03-01
+
+SECTION 1 - DWELLING COVERAGE
+Covers loss up to ${dwelling_limit}.
+Perils: fire, lightning, windstorm, hail, vandalism.
+Flood and earthquake require separate policies.
+
+SECTION 2 - PERSONAL PROPERTY
+Covered up to ${personal_limit}. Deductible: ${deductible}
+
+SECTION 3 - LIABILITY
+Personal liability coverage of ${liability_limit}.
+
+SECTION 4 - CLAIMS
+Claims must be reported within 30 days of discovery."""
+
+    FAQS = [
+        ("How long does it take to process an auto claim?",
+         "Auto claims are processed within 14 business days after all documents are received."),
+        ("What is a deductible?",
+         "A deductible is the amount you pay out of pocket before insurance covers the rest."),
+        ("Is flood damage covered under homeowners policy?",
+         "No. Standard homeowners insurance excludes flood damage. You need a separate policy."),
+        ("Can I cancel my policy at any time?",
+         "Yes. Most policies allow cancellation with 30 days written notice."),
+        ("What happens if I miss a premium payment?",
+         "Most policies provide a 30 day grace period before the policy lapses."),
+    ]
+
+    NAMES     = ["Alex Patel", "Jordan Garcia", "Sam Smith", "Taylor Nguyen"]
+    ADDRESSES = ["123 Maple St", "456 Oak Ave", "789 Pine Rd"]
+
+    def rand_policy_no(prefix):
+        return f"{prefix}-{random.randint(100000, 999999)}"
+
+    for i in range(3):
+        # Auto policy
+        content = AUTO.format(
+            policy_no   = rand_policy_no("AUTO"),
+            holder      = random.choice(NAMES),
+            premium     = random.choice([850, 1200, 1450]),
+            collision_ded = random.choice([250, 500, 1000]),
+        )
+        (raw_dir / f"auto_policy_{i+1}.txt").write_text(content)
+
+        # Home policy
+        content = HOME.format(
+            policy_no     = rand_policy_no("HOME"),
+            holder        = random.choice(NAMES),
+            dwelling_limit = random.choice([250000, 400000]),
+            personal_limit = random.choice([50000, 100000]),
+            deductible    = random.choice([500, 1000]),
+            liability_limit = random.choice([100000, 300000]),
+        )
+        (raw_dir / f"home_policy_{i+1}.txt").write_text(content)
+
+    # FAQ
+    faq_content = "FREQUENTLY ASKED QUESTIONS\n\n"
+    for q, a in FAQS:
+        faq_content += f"Q: {q}\nA: {a}\n\n"
+    (raw_dir / "faqs.txt").write_text(faq_content)
+
+    print(f"Generated {6 + 1} synthetic documents")
+
+
+# ── Lifespan ──────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Modern replacement for @app.on_event("startup").
-    Loads models and builds indexes once at startup.
-    Why once? Loading is slow — reuse across all requests.
+    Runs on startup and shutdown.
+    Loads models and builds indexes once.
     """
+    print("Starting up...")
+
+    # Step 1 — generate docs if needed
+    RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    if not list(RAW_DIR.glob("*.txt")):
+        generate_synthetic_docs(RAW_DIR)
+
+    # Step 2 — load embedding model
     print("Loading embedding model...")
     state["embedding_model"] = SentenceTransformer('all-MiniLM-L6-v2')
 
-    print("Loading documents and building indexes...")
-    RAW_DIR    = Path(__file__).resolve().parents[1] / "data" / "raw"
+    # Step 3 — chunk documents
+    print("Chunking documents...")
     CHUNK_SIZE = 50
     OVERLAP    = 10
-
-    # Chunk documents
     all_chunks = []
+
     for filepath in RAW_DIR.glob("*.txt"):
         text  = filepath.read_text(encoding="utf-8")
         words = text.split()
@@ -107,13 +212,14 @@ async def lifespan(app: FastAPI):
             start = start + CHUNK_SIZE - OVERLAP
             i    += 1
 
-    # Embed chunks
+    # Step 4 — embed chunks
+    print("Embedding chunks...")
     all_embeddings = []
     for chunk in all_chunks:
         vector = state["embedding_model"].encode(chunk["text"])
         all_embeddings.append({**chunk, "embedding": vector.tolist()})
 
-    # Build FAISS
+    # Step 5 — build FAISS
     embeddings_matrix = np.array(
         [c["embedding"] for c in all_embeddings],
         dtype=np.float32
@@ -121,25 +227,24 @@ async def lifespan(app: FastAPI):
     faiss_idx = faiss.IndexFlatL2(384)
     faiss_idx.add(embeddings_matrix)
 
-    # Build BM25
+    # Step 6 — build BM25
     tokenized = [c["text"].lower().split() for c in all_chunks]
     bm25_idx  = BM25Okapi(tokenized)
 
-    # Store in state
-    state["faiss_index"]   = faiss_idx
-    state["bm25_index"]    = bm25_idx
-    state["all_chunks"]    = all_chunks
+    # Store everything
+    state["faiss_index"]    = faiss_idx
+    state["bm25_index"]     = bm25_idx
+    state["all_chunks"]     = all_chunks
     state["all_embeddings"] = all_embeddings
 
     print(f"Ready. {len(all_chunks)} chunks indexed.")
 
-    yield  # API runs here
+    yield
 
-    # Shutdown cleanup
     print("Shutting down.")
 
 
-# ── App setup ─────────────────────────────────────────
+# ── App ───────────────────────────────────────────────
 app = FastAPI(
     title       = "Insurance RAG API",
     description = "Answers insurance questions using hybrid retrieval and GPT-4.1",
@@ -169,8 +274,9 @@ def hybrid_retrieve(query, top_k=3):
     all_chunks      = state["all_chunks"]
     all_embeddings  = state["all_embeddings"]
 
-    query_embedding = embedding_model.encode(query).tolist()
-    query_vector    = np.array([query_embedding], dtype=np.float32)
+    # FAISS search
+    query_embedding    = embedding_model.encode(query).tolist()
+    query_vector       = np.array([query_embedding], dtype=np.float32)
     distances, indices = faiss_index.search(query_vector, top_k)
 
     faiss_results = []
@@ -184,6 +290,7 @@ def hybrid_retrieve(query, top_k=3):
             "rank"    : i + 1,
         })
 
+    # BM25 search
     tokenized_query = query.lower().split()
     scores          = bm25_index.get_scores(tokenized_query)
     top_indexes     = sorted(range(len(scores)),
@@ -198,6 +305,7 @@ def hybrid_retrieve(query, top_k=3):
             "rank"    : rank + 1,
         })
 
+    # RRF fusion
     scores_rrf = {}
     chunks_map = {}
     for result in faiss_results + bm25_results:
