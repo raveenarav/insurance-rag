@@ -14,7 +14,7 @@ from sentence_transformers import SentenceTransformer
 
 # Load model once at module level
 # Why? Loading is slow - we only want to do it once
-model = SentenceTransformer('all-MiniLM-L6-v2')
+model = SentenceTransformer('paraphrase-MiniLM-L3-v2')
 
 # 384 dimensions
 # OpenAI text-embedding-3-small = 1536 dimensions (more precise)

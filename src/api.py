@@ -188,7 +188,7 @@ async def lifespan(app: FastAPI):
 
     # Step 2 — load embedding model
     print("Loading embedding model...")
-    state["embedding_model"] = SentenceTransformer('all-MiniLM-L6-v2')
+    state["embedding_model"] = SentenceTransformer('paraphrase-MiniLM-L3-v2')
 
     # Step 3 — chunk documents
     print("Chunking documents...")
